@@ -16,13 +16,6 @@ import (
 	"github.com/google/certificate-transparency-go/tls"
 )
 
-// From trillian/storage/mysql/log_storage.go
-const (
-	valuesPlaceholder5     = "(?,?,?,?,?)"
-	insertLeafDataSQL      = "INSERT INTO LeafData(TreeId,LeafIdentityHash,LeafValue,ExtraData,QueueTimestampNanos) VALUES" + valuesPlaceholder5
-	insertSequencedLeafSQL = "INSERT INTO SequencedLeafData(TreeId,LeafIdentityHash,MerkleLeafHash,SequenceNumber,IntegrateTimestampNanos) VALUES"
-)
-
 func main() {
 	err := main2()
 	if err != nil {
@@ -66,6 +59,12 @@ func main2() error {
 	return nil
 }
 
+// transact runs the logic of this tool, inside a DB transaction:
+//  - Read both entries.
+//  - Confirm they point at the same LeafIdentityHash.
+//  - Come up with a new LeafIdentityHash.
+//  - Insert a new LeafData with the new LeafIdentityHash, and the corrected timestamp.
+//  - Update the SequencedLeaf for `first` to point at the new LeafIdentityHash.
 func transact(tx *sql.Tx, treeId, firstIndex, secondIndex, newTimestamp int64) error {
 	first, err := selectSequencedLeaf(tx, treeId, firstIndex)
 	if err != nil {
@@ -132,6 +131,9 @@ func transact(tx *sql.Tx, treeId, firstIndex, secondIndex, newTimestamp int64) e
 	return nil
 }
 
+// SequencedLeaf represents a row in Trillian's SequencedLeafData table. See:
+// https://github.com/google/trillian/blob/998c07765e8725c8ee53fb16736b25771013916e/storage/mysql/schema/storage.sql#L94-L114
+// https://github.com/google/trillian/blob/998c07765e8725c8ee53fb16736b25771013916e/storage/mysql/log_storage.go#L46
 type SequencedLeaf struct {
 	TreeId                  int64
 	LeafIdentityHash        []byte
@@ -157,6 +159,8 @@ func selectSequencedLeaf(tx *sql.Tx, treeId, index int64) (*SequencedLeaf, error
 	)
 }
 
+// updateSequencedLeaf updates an already-existing row in the SequencedLeafData table to point at a new
+// LeafIdentityHash. Errors if it fails to update exactly one row.
 func updateSequencedLeaf(tx *sql.Tx, sequencedLeaf *SequencedLeaf, newLeafData *LeafData) error {
 	if sequencedLeaf.TreeId != newLeafData.TreeId {
 		return fmt.Errorf("sequencedLeafTreeId != leafData.TreeId: %d vs %d", sequencedLeaf.TreeId, newLeafData.TreeId)
@@ -166,7 +170,7 @@ func updateSequencedLeaf(tx *sql.Tx, sequencedLeaf *SequencedLeaf, newLeafData *
 		WHERE TreeId = ?
 		AND SequenceNumber = ?
 		LIMIT 1`
-	result, err := tx.Exec(selectSequencedLeafSQL, sequencedLeaf.TreeId, sequencedLeaf.SequenceNumber)
+	result, err := tx.Exec(selectSequencedLeafSQL, newLeafData.LeafIdentityHash, sequencedLeaf.TreeId, sequencedLeaf.SequenceNumber)
 	if err != nil {
 		return err
 	}
@@ -180,6 +184,10 @@ func updateSequencedLeaf(tx *sql.Tx, sequencedLeaf *SequencedLeaf, newLeafData *
 	return nil
 }
 
+// LeafData represents a row in Trillian's LeafData table. See:
+//
+// https://github.com/google/trillian/blob/998c07765e8725c8ee53fb16736b25771013916e/storage/mysql/schema/storage.sql#L70-L92
+// https://github.com/google/trillian/blob/998c07765e8725c8ee53fb16736b25771013916e/storage/mysql/log_storage.go#L45
 type LeafData struct {
 	TreeId              int64
 	LeafIdentityHash    []byte
@@ -188,6 +196,7 @@ type LeafData struct {
 	QueueTimestampNanos int64
 }
 
+// selectLeafData retrieves a single LeafData entry from the database, indexed by TreeID and LeafIdentityHash.
 func selectLeafData(tx *sql.Tx, treeId int64, leafIdentityHash []byte) (*LeafData, error) {
 	leafData := new(LeafData)
 
@@ -206,6 +215,8 @@ func selectLeafData(tx *sql.Tx, treeId int64, leafIdentityHash []byte) (*LeafDat
 	)
 }
 
+// insertLeafData inserts a single LeafData entry into the database. Errors if an entry already exists with
+// the same primary key (TreeID and LeafIdentityHash).
 func insertLeafData(tx *sql.Tx, leafData *LeafData) error {
 	const insertLeafDataSQL = `INSERT INTO LeafData(TreeId, LeafIdentityHash, LeafValue, ExtraData, QueueTimestampNanos) VALUES (?, ?, ?, ?, ?)`
 	result, err := tx.Exec(insertLeafDataSQL,
