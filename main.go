@@ -28,10 +28,19 @@ func main2() error {
 	firstIndex := flag.Int64("first", -1, "Index of first (broken) entry in log to be repaired")
 	secondIndex := flag.Int64("second", -1, "Index of second (ok) entry in log to be repaired")
 	newTimestamp := flag.Int64("newTimestamp", -1, "New timestamp to assign to first (broken) entry. In epoch milliseconds")
+	flag.Parse()
 
-	if *treeId == -1 || *firstIndex == -1 || *secondIndex == -1 {
+	if *treeId == -1 {
 		flag.Usage()
-		return fmt.Errorf("invalid flags")
+		return fmt.Errorf("invalid flags: no treeId")
+	}
+	if *firstIndex == -1 {
+		flag.Usage()
+		return fmt.Errorf("invalid flags: no first")
+	}
+	if *secondIndex == -1 {
+		flag.Usage()
+		return fmt.Errorf("invalid flags: no second")
 	}
 
 	dsn := os.Getenv("DB")
@@ -56,6 +65,12 @@ func main2() error {
 		}
 		return fmt.Errorf("%w (rolled back)", err)
 	}
+
+	err = tx.Commit()
+	if err != nil {
+		return fmt.Errorf("committing transaction: %w", err)
+	}
+
 	return nil
 }
 
@@ -68,11 +83,11 @@ func main2() error {
 func transact(tx *sql.Tx, treeId, firstIndex, secondIndex, newTimestamp int64) error {
 	first, err := selectSequencedLeaf(tx, treeId, firstIndex)
 	if err != nil {
-		return err
+		return fmt.Errorf("selecting first leaf: %w", err)
 	}
 	second, err := selectSequencedLeaf(tx, treeId, firstIndex)
 	if err != nil {
-		return err
+		return fmt.Errorf("selecting second leaf: %w", err)
 	}
 
 	// Verify our assumptions
@@ -86,12 +101,13 @@ func transact(tx *sql.Tx, treeId, firstIndex, secondIndex, newTimestamp int64) e
 	origLeafIdentityHash := first.LeafIdentityHash
 	// TODO: New leafIdentityHash is the result of hashing the old one a second time. Good enough?
 	newLeafIdentityHash := sha256.Sum256(origLeafIdentityHash)
+	log.Printf("new leaf identity hash: %x", newLeafIdentityHash)
 
 	// Fetch the existing single LeafData, so we can modify it to have the correct timestamp and
 	// save a new copy under newLeafIdentityHash, then update `first` to point at it.
 	leafData, err := selectLeafData(tx, treeId, origLeafIdentityHash)
 	if err != nil {
-		return fmt.Errorf("selecting leaf data: %w", err)
+		return fmt.Errorf("selecting leaf data for origLeafIdentityHash %x: %w", origLeafIdentityHash, err)
 	}
 
 	// leafData.LeafValue contains the TLS-encoded Merkle tree leaf, which in turn contains
@@ -100,7 +116,7 @@ func transact(tx *sql.Tx, treeId, firstIndex, secondIndex, newTimestamp int64) e
 	var merkleLeaf ct.MerkleTreeLeaf
 	_, err = tls.Unmarshal(leafData.LeafValue, &merkleLeaf)
 	if err != nil {
-		return fmt.Errorf("unmarshaling leaf data: %w", err)
+		return fmt.Errorf("unmarshaling leaf data %x: %w", leafData.LeafValue, err)
 	}
 
 	merkleLeaf.TimestampedEntry.Timestamp = uint64(newTimestamp)
@@ -145,7 +161,7 @@ type SequencedLeaf struct {
 func selectSequencedLeaf(tx *sql.Tx, treeId, index int64) (*SequencedLeaf, error) {
 	leaf := new(SequencedLeaf)
 	const selectSequencedLeafSQL = `SELECT
-		(TreeId, LeafIdentityHash, MerkleLeafHash, SequenceNumber, IntegrateTimestampNanos)
+		TreeId, LeafIdentityHash, MerkleLeafHash, SequenceNumber, IntegrateTimestampNanos
 		FROM SequencedLeafData
 		WHERE TreeId = ?
 		AND SequenceNumber = ?`
@@ -201,8 +217,8 @@ func selectLeafData(tx *sql.Tx, treeId int64, leafIdentityHash []byte) (*LeafDat
 	leafData := new(LeafData)
 
 	const selectLeafDataSQL = `SELECT
-		(TreeId, LeafIdentityHash, MerkleLeafHash, SequenceNumber, IntegrateTimestampNanos)
-		FROM SequencedLeafData
+		TreeId, LeafIdentityHash, LeafValue, ExtraData, QueueTimestampNanos
+		FROM LeafData
 		WHERE TreeId = ?
 		AND LeafIdentityHash = ?`
 	row := tx.QueryRow(selectLeafDataSQL, treeId, leafIdentityHash)
