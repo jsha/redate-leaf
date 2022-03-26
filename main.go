@@ -6,10 +6,14 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/csv"
+	"encoding/hex"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
+	"strconv"
 
 	_ "github.com/go-sql-driver/mysql"
 	ct "github.com/google/certificate-transparency-go"
@@ -25,23 +29,7 @@ func main() {
 
 func main2() error {
 	treeId := flag.Int64("treeId", -1, "Tree ID")
-	firstIndex := flag.Int64("first", -1, "Index of first (broken) entry in log to be repaired")
-	secondIndex := flag.Int64("second", -1, "Index of second (ok) entry in log to be repaired")
-	newTimestamp := flag.Int64("newTimestamp", -1, "New timestamp to assign to first (broken) entry. In epoch milliseconds")
 	flag.Parse()
-
-	if *treeId == -1 {
-		flag.Usage()
-		return fmt.Errorf("invalid flags: no treeId")
-	}
-	if *firstIndex == -1 {
-		flag.Usage()
-		return fmt.Errorf("invalid flags: no first")
-	}
-	if *secondIndex == -1 {
-		flag.Usage()
-		return fmt.Errorf("invalid flags: no second")
-	}
 
 	dsn := os.Getenv("DB")
 	if dsn == "" {
@@ -52,20 +40,50 @@ func main2() error {
 		return fmt.Errorf("opening DB: %w", err)
 	}
 
-	return redateLeaf(db, *treeId, *firstIndex, *secondIndex, *newTimestamp)
+	reader := csv.NewReader(os.Stdin)
+	for {
+		record, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("scanning CSV: %w", err)
+		}
+
+		if len(record) != 2 {
+			return fmt.Errorf("wrong number of records in CSV file: expected 2, got %d", len(record))
+		}
+		firstIndexString := record[0]
+		merkleLeafBytes, err := hex.DecodeString(record[1])
+		if err != nil {
+			return fmt.Errorf("unmarshaling Merkle leaf bytes: %w", err)
+		}
+
+		firstIndex, err := strconv.ParseInt(firstIndexString, 10, 64)
+		if err != nil {
+			return fmt.Errorf("parsing %q as int: %w", firstIndexString, err)
+		}
+
+		err = redateLeaf(db, *treeId, firstIndex, merkleLeafBytes)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
-func redateLeaf(db *sql.DB, treeId, firstIndex, secondIndex, newTimestamp int64) error {
+func redateLeaf(db *sql.DB, treeId, index int64, merkleLeafBytes []byte) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return fmt.Errorf("starting transaction: %w", err)
 	}
 
-	err = redateLeafInner(tx, treeId, firstIndex, secondIndex, newTimestamp)
+	err = redateLeafInner(tx, treeId, index, merkleLeafBytes)
 	if err != nil {
 		err2 := tx.Rollback()
 		if err2 != nil {
-			return fmt.Errorf("%w; also, while rolling back: %w", err, err2)
+			return fmt.Errorf("%w; also, while rolling back: %s", err, err2)
 		}
 		return fmt.Errorf("%w (rolled back)", err)
 	}
@@ -79,35 +97,36 @@ func redateLeaf(db *sql.DB, treeId, firstIndex, secondIndex, newTimestamp int64)
 }
 
 // redateLeafInner runs the logic of this tool, inside a DB transaction:
-//  - Read both entries.
-//  - Confirm they point at the same LeafIdentityHash.
+//  - Read the entry.
 //  - Come up with a new LeafIdentityHash.
 //  - Insert a new LeafData with the new LeafIdentityHash, and the corrected timestamp.
 //  - Update the SequencedLeaf for `first` to point at the new LeafIdentityHash.
-func redateLeafInner(tx *sql.Tx, treeId, firstIndex, secondIndex, newTimestamp int64) error {
-	first, err := selectSequencedLeaf(tx, treeId, firstIndex)
+func redateLeafInner(tx *sql.Tx, treeId, index int64, correctMerkleLeafBytes []byte) error {
+	sequencedLeaf, err := selectSequencedLeaf(tx, treeId, index)
 	if err != nil {
 		return fmt.Errorf("selecting first leaf: %w", err)
 	}
-	second, err := selectSequencedLeaf(tx, treeId, firstIndex)
-	if err != nil {
-		return fmt.Errorf("selecting second leaf: %w", err)
-	}
 
 	// Verify our assumptions
-	if !bytes.Equal(first.LeafIdentityHash, second.LeafIdentityHash) {
-		return fmt.Errorf("expected LeafIdentityHashes to be equal but they weren't. %d: %x; %d: %x",
-			firstIndex, first.LeafIdentityHash, secondIndex, second.LeafIdentityHash)
+	err = expectDuplicateSequencedLeaf(tx, treeId, sequencedLeaf.LeafIdentityHash)
+	if err != nil {
+		return fmt.Errorf("expected duplicate sequencedLeaf rows with the same LeafIdentityHash, but didn't get them: %w", err)
 	}
 
-	// The two SequencedLeaf entries point at a single LeafData, because they have the same
-	// LeafIdentityHash.
-	origLeafIdentityHash := first.LeafIdentityHash
+	// The stored Merkle leaf hash in the SequencedLeafData table is correct; it's just the LeafValue in
+	// the LeafData table that's wrong. Verify that.
+	correctMerkleHash := sha256.Sum256(correctMerkleLeafBytes)
+	if !bytes.Equal(correctMerkleHash[:], sequencedLeaf.MerkleLeafHash) {
+		return fmt.Errorf("mismatch: SequencedLeaf.MerkleLeafHash != SHA-256(Merkle Leaf Bytes from CSV): %x vs %x",
+			sequencedLeaf.MerkleLeafHash, correctMerkleHash[:])
+	}
+
 	// TODO: New leafIdentityHash is the result of hashing the old one a second time. Good enough?
+	origLeafIdentityHash := sequencedLeaf.LeafIdentityHash
 	newLeafIdentityHash := sha256.Sum256(origLeafIdentityHash)
 
 	// Fetch the existing single LeafData, so we can modify it to have the correct timestamp and
-	// save a new copy under newLeafIdentityHash, then update `first` to point at it.
+	// save a new copy under newLeafIdentityHash, then update the SequencedLeafData entry to point at it.
 	leafData, err := selectLeafData(tx, treeId, origLeafIdentityHash)
 	if err != nil {
 		return fmt.Errorf("selecting leaf data for origLeafIdentityHash %x: %w", origLeafIdentityHash, err)
@@ -116,18 +135,31 @@ func redateLeafInner(tx *sql.Tx, treeId, firstIndex, secondIndex, newTimestamp i
 	// leafData.LeafValue contains the TLS-encoded Merkle tree leaf, which in turn contains
 	// the timestamp we care about. Decode it (umarshal it) so we can modify the timestamp and
 	// re-encode.
-	var merkleLeaf ct.MerkleTreeLeaf
-	_, err = tls.Unmarshal(leafData.LeafValue, &merkleLeaf)
+	var brokenMerkleLeaf ct.MerkleTreeLeaf
+	_, err = tls.Unmarshal(leafData.LeafValue, &brokenMerkleLeaf)
 	if err != nil {
 		return fmt.Errorf("unmarshaling leaf data %x: %w", leafData.LeafValue, err)
 	}
 
-	merkleLeaf.TimestampedEntry.Timestamp = uint64(newTimestamp)
+	var correctMerkleLeaf ct.MerkleTreeLeaf
+	_, err = tls.Unmarshal(correctMerkleLeafBytes, &correctMerkleLeaf)
+	if err != nil {
+		return fmt.Errorf("unmarshaling Merkle Leaf Bytes from CSV %x: %w", correctMerkleLeafBytes, err)
+	}
+
+	newTimestamp := correctMerkleLeaf.TimestampedEntry.Timestamp
+	brokenMerkleLeaf.TimestampedEntry.Timestamp = newTimestamp
 
 	// The updated, TLS-encoded Merkle tree leaf.
-	newLeafValue, err := tls.Marshal(merkleLeaf)
+	newLeafValue, err := tls.Marshal(brokenMerkleLeaf)
 	if err != nil {
 		return fmt.Errorf("marshaling modified Merkle tree leaf: %w", err)
+	}
+
+	fixedMerkleLeafHash := sha256.Sum256(newLeafValue)
+	if !bytes.Equal(fixedMerkleLeafHash[:], sequencedLeaf.MerkleLeafHash) {
+		return fmt.Errorf("mismatch: SequencedLeaf.MerkleLeafHash != SHA-256(newLeafValue): %x vs %x",
+			sequencedLeaf.MerkleLeafHash, correctMerkleHash[:])
 	}
 
 	// The updated Trillian-internal data structure that contains the Merkle tree leaf.
@@ -142,7 +174,7 @@ func redateLeafInner(tx *sql.Tx, treeId, firstIndex, secondIndex, newTimestamp i
 	}
 
 	// Update the first of the two SequencedLeafs to point at the new LeafData, with the corrected timestamp.
-	err = updateSequencedLeaf(tx, first, newLeafData)
+	err = updateSequencedLeaf(tx, sequencedLeaf, newLeafData)
 	if err != nil {
 		return fmt.Errorf("updating sequenced leaf: %w", err)
 	}
@@ -176,6 +208,24 @@ func selectSequencedLeaf(tx *sql.Tx, treeId, index int64) (*SequencedLeaf, error
 		&leaf.SequenceNumber,
 		&leaf.IntegrateTimestampNanos,
 	)
+}
+
+func expectDuplicateSequencedLeaf(tx *sql.Tx, treeId int64, leafIdentityHash []byte) error {
+	const selectSequencedLeafSQL = `SELECT
+	    COUNT(*)
+	    FROM SequencedLeafData
+		WHERE TreeId = ?
+		AND LeafIdentityHash = ?`
+	row := tx.QueryRow(selectSequencedLeafSQL, treeId, leafIdentityHash)
+	var count int64
+	err := row.Scan(&count)
+	if err != nil {
+		return fmt.Errorf("checking for duplicates: scanning row: %w", err)
+	}
+	if count != 2 {
+		return fmt.Errorf("expected exactly 2 duplicate SequencedLeafData with LeafIdentityHash %x, got %d", leafIdentityHash)
+	}
+	return nil
 }
 
 // updateSequencedLeaf updates an already-existing row in the SequencedLeafData table to point at a new
