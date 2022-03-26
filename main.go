@@ -52,12 +52,16 @@ func main2() error {
 		return fmt.Errorf("opening DB: %w", err)
 	}
 
+	return redateLeaf(db, *treeId, *firstIndex, *secondIndex, *newTimestamp)
+}
+
+func redateLeaf(db *sql.DB, treeId, firstIndex, secondIndex, newTimestamp int64) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return fmt.Errorf("starting transaction: %w", err)
 	}
 
-	err = transact(tx, *treeId, *firstIndex, *secondIndex, *newTimestamp)
+	err = redateLeafInner(tx, treeId, firstIndex, secondIndex, newTimestamp)
 	if err != nil {
 		err2 := tx.Rollback()
 		if err2 != nil {
@@ -74,13 +78,13 @@ func main2() error {
 	return nil
 }
 
-// transact runs the logic of this tool, inside a DB transaction:
+// redateLeafInner runs the logic of this tool, inside a DB transaction:
 //  - Read both entries.
 //  - Confirm they point at the same LeafIdentityHash.
 //  - Come up with a new LeafIdentityHash.
 //  - Insert a new LeafData with the new LeafIdentityHash, and the corrected timestamp.
 //  - Update the SequencedLeaf for `first` to point at the new LeafIdentityHash.
-func transact(tx *sql.Tx, treeId, firstIndex, secondIndex, newTimestamp int64) error {
+func redateLeafInner(tx *sql.Tx, treeId, firstIndex, secondIndex, newTimestamp int64) error {
 	first, err := selectSequencedLeaf(tx, treeId, firstIndex)
 	if err != nil {
 		return fmt.Errorf("selecting first leaf: %w", err)
@@ -101,7 +105,6 @@ func transact(tx *sql.Tx, treeId, firstIndex, secondIndex, newTimestamp int64) e
 	origLeafIdentityHash := first.LeafIdentityHash
 	// TODO: New leafIdentityHash is the result of hashing the old one a second time. Good enough?
 	newLeafIdentityHash := sha256.Sum256(origLeafIdentityHash)
-	log.Printf("new leaf identity hash: %x", newLeafIdentityHash)
 
 	// Fetch the existing single LeafData, so we can modify it to have the correct timestamp and
 	// save a new copy under newLeafIdentityHash, then update `first` to point at it.
