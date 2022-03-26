@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/csv"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -40,52 +41,25 @@ func main2() error {
 		return fmt.Errorf("opening DB: %w", err)
 	}
 
-	reader := csv.NewReader(os.Stdin)
-	for {
-		record, err := reader.Read()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("scanning CSV: %w", err)
-		}
-
-		if len(record) != 2 {
-			return fmt.Errorf("wrong number of records in CSV file: expected 2, got %d", len(record))
-		}
-		firstIndexString := record[0]
-		merkleLeafBytes, err := hex.DecodeString(record[1])
-		if err != nil {
-			return fmt.Errorf("unmarshaling Merkle leaf bytes: %w", err)
-		}
-
-		firstIndex, err := strconv.ParseInt(firstIndexString, 10, 64)
-		if err != nil {
-			return fmt.Errorf("parsing %q as int: %w", firstIndexString, err)
-		}
-
-		err = redateLeaf(db, *treeId, firstIndex, merkleLeafBytes)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func redateLeaf(db *sql.DB, treeId, index int64, merkleLeafBytes []byte) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return fmt.Errorf("starting transaction: %w", err)
 	}
 
-	err = redateLeafInner(tx, treeId, index, merkleLeafBytes)
-	if err != nil {
-		err2 := tx.Rollback()
-		if err2 != nil {
-			return fmt.Errorf("%w; also, while rolling back: %s", err, err2)
+	reader := csv.NewReader(os.Stdin)
+	for {
+		err := processRow(tx, reader, *treeId)
+		if errors.Is(err, io.EOF) {
+			break
 		}
-		return fmt.Errorf("%w (rolled back)", err)
+		if err != nil {
+			err2 := tx.Rollback()
+			if err2 != nil {
+				return fmt.Errorf("%w; also, while rolling back: %s", err, err2)
+			}
+			return fmt.Errorf("%w (rolled back)", err)
+		}
+
 	}
 
 	err = tx.Commit()
@@ -96,12 +70,39 @@ func redateLeaf(db *sql.DB, treeId, index int64, merkleLeafBytes []byte) error {
 	return nil
 }
 
-// redateLeafInner runs the logic of this tool, inside a DB transaction:
+func processRow(tx *sql.Tx, reader *csv.Reader, treeId int64) error {
+	record, err := reader.Read()
+	if err != nil {
+		return fmt.Errorf("scanning CSV: %w", err)
+	}
+
+	if len(record) != 2 {
+		return fmt.Errorf("wrong number of records in CSV file: expected 2, got %d", len(record))
+	}
+	indexString := record[0]
+	merkleLeafBytes, err := hex.DecodeString(record[1])
+	if err != nil {
+		return fmt.Errorf("unmarshaling Merkle leaf bytes: %w", err)
+	}
+
+	index, err := strconv.ParseInt(indexString, 10, 64)
+	if err != nil {
+		return fmt.Errorf("parsing %q as int: %w", indexString, err)
+	}
+
+	err = redateLeaf(tx, treeId, index, merkleLeafBytes)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// redateLeaf runs the logic of this tool, inside a DB transaction:
 //  - Read the entry.
 //  - Come up with a new LeafIdentityHash.
 //  - Insert a new LeafData with the new LeafIdentityHash, and the corrected timestamp.
 //  - Update the SequencedLeaf for `first` to point at the new LeafIdentityHash.
-func redateLeafInner(tx *sql.Tx, treeId, index int64, correctMerkleLeafBytes []byte) error {
+func redateLeaf(tx *sql.Tx, treeId, index int64, correctMerkleLeafBytes []byte) error {
 	sequencedLeaf, err := selectSequencedLeaf(tx, treeId, index)
 	if err != nil {
 		return fmt.Errorf("selecting first leaf: %w", err)
