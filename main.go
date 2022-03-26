@@ -108,14 +108,9 @@ func redateLeaf(tx *sql.Tx, treeId, index int64, correctMerkleLeafBytes []byte) 
 		return fmt.Errorf("selecting first leaf: %w", err)
 	}
 
-	// Verify our assumptions
-	err = expectDuplicateSequencedLeaf(tx, treeId, sequencedLeaf.LeafIdentityHash)
-	if err != nil {
-		return fmt.Errorf("expected duplicate sequencedLeaf rows with the same LeafIdentityHash, but didn't get them: %w", err)
-	}
-
+	// Verify an assumption:
 	// The stored Merkle leaf hash in the SequencedLeafData table is correct; it's just the LeafValue in
-	// the LeafData table that's wrong. Verify that.
+	// the LeafData table that's wrong.
 	correctMerkleHash := sha256.Sum256(correctMerkleLeafBytes)
 	if !bytes.Equal(correctMerkleHash[:], sequencedLeaf.MerkleLeafHash) {
 		return fmt.Errorf("mismatch: SequencedLeaf.MerkleLeafHash != SHA-256(Merkle Leaf Bytes from CSV): %x vs %x",
@@ -131,6 +126,12 @@ func redateLeaf(tx *sql.Tx, treeId, index int64, correctMerkleLeafBytes []byte) 
 	leafData, err := selectLeafData(tx, treeId, origLeafIdentityHash)
 	if err != nil {
 		return fmt.Errorf("selecting leaf data for origLeafIdentityHash %x: %w", origLeafIdentityHash, err)
+	}
+
+	// Verify an assumption:
+	// We expect the fetched LeafData to differ from the correctMerkleLeafBytes
+	if bytes.Equal(leafData.LeafValue, correctMerkleLeafBytes) {
+		return fmt.Errorf("expected stored leafData.LeafValue to differ from correctMerkleLeafBytes, but they were the same")
 	}
 
 	// leafData.LeafValue contains the TLS-encoded Merkle tree leaf, which in turn contains
@@ -209,24 +210,6 @@ func selectSequencedLeaf(tx *sql.Tx, treeId, index int64) (*SequencedLeaf, error
 		&leaf.SequenceNumber,
 		&leaf.IntegrateTimestampNanos,
 	)
-}
-
-func expectDuplicateSequencedLeaf(tx *sql.Tx, treeId int64, leafIdentityHash []byte) error {
-	const selectSequencedLeafSQL = `SELECT
-	    COUNT(*)
-	    FROM SequencedLeafData
-		WHERE TreeId = ?
-		AND LeafIdentityHash = ?`
-	row := tx.QueryRow(selectSequencedLeafSQL, treeId, leafIdentityHash)
-	var count int64
-	err := row.Scan(&count)
-	if err != nil {
-		return fmt.Errorf("checking for duplicates: scanning row: %w", err)
-	}
-	if count != 2 {
-		return fmt.Errorf("expected exactly 2 duplicate SequencedLeafData with LeafIdentityHash %x, got %d", leafIdentityHash)
-	}
-	return nil
 }
 
 // updateSequencedLeaf updates an already-existing row in the SequencedLeafData table to point at a new
