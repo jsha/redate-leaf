@@ -97,11 +97,11 @@ func processRow(tx *sql.Tx, reader *csv.Reader, treeId int64) error {
 	return nil
 }
 
-// redateLeaf runs the logic of this tool, inside a DB transaction:
+// redateLeaf runs the logic of this tool, as part of a DB transaction:
 //  - Read the entry.
 //  - Come up with a new LeafIdentityHash.
 //  - Insert a new LeafData with the new LeafIdentityHash, and the corrected timestamp.
-//  - Update the SequencedLeaf for `first` to point at the new LeafIdentityHash.
+//  - Update the SequencedLeaf for to point at the new LeafIdentityHash.
 func redateLeaf(tx *sql.Tx, treeId, index int64, correctMerkleLeafBytes []byte) error {
 	sequencedLeaf, err := selectSequencedLeaf(tx, treeId, index)
 	if err != nil {
@@ -117,7 +117,9 @@ func redateLeaf(tx *sql.Tx, treeId, index int64, correctMerkleLeafBytes []byte) 
 			sequencedLeaf.MerkleLeafHash, correctMerkleHash[:])
 	}
 
-	// TODO: New leafIdentityHash is the result of hashing the old one a second time. Good enough?
+	// New leafIdentityHash is the result of hashing the old one a second time. Nothing
+	// particularly meaningful about this choice. It's just a way to come up with a different
+	// value that is likely to be unique, and is deterministic.
 	origLeafIdentityHash := sequencedLeaf.LeafIdentityHash
 	newLeafIdentityHash := sha256.Sum256(origLeafIdentityHash)
 
@@ -156,6 +158,11 @@ func redateLeaf(tx *sql.Tx, treeId, index int64, correctMerkleLeafBytes []byte) 
 	newLeafValue, err := tls.Marshal(brokenMerkleLeaf)
 	if err != nil {
 		return fmt.Errorf("marshaling modified Merkle tree leaf: %w", err)
+	}
+
+	if !bytes.Equal(newLeafValue, correctMerkleLeafBytes) {
+		return fmt.Errorf("mismatch: expected newLeafValue == correctMerkleLeafBytes: %x vs %x",
+			newLeafValue, correctMerkleLeafBytes)
 	}
 
 	fixedMerkleLeafHash := sha256.Sum256(newLeafValue)
@@ -221,8 +228,7 @@ func updateSequencedLeaf(tx *sql.Tx, sequencedLeaf *SequencedLeaf, newLeafData *
 	const selectSequencedLeafSQL = `UPDATE SequencedLeafData
 		SET LeafIdentityHash = ?
 		WHERE TreeId = ?
-		AND SequenceNumber = ?
-		LIMIT 1`
+		AND SequenceNumber = ?`
 	result, err := tx.Exec(selectSequencedLeafSQL, newLeafData.LeafIdentityHash, sequencedLeaf.TreeId, sequencedLeaf.SequenceNumber)
 	if err != nil {
 		return err
