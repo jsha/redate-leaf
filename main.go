@@ -92,7 +92,7 @@ func processRow(tx *sql.Tx, reader *csv.Reader, treeId int64) error {
 
 	err = redateLeaf(tx, treeId, index, merkleLeafBytes)
 	if err != nil {
-		return err
+		return fmt.Errorf("index %d: %w", index, err)
 	}
 	return nil
 }
@@ -271,7 +271,9 @@ func selectLeafData(tx *sql.Tx, treeId int64, leafIdentityHash []byte) (*LeafDat
 // insertLeafData inserts a single LeafData entry into the database. Errors if an entry already exists with
 // the same primary key (TreeID and LeafIdentityHash).
 func insertLeafData(tx *sql.Tx, leafData *LeafData) error {
-	const insertLeafDataSQL = `INSERT INTO LeafData(TreeId, LeafIdentityHash, LeafValue, ExtraData, QueueTimestampNanos) VALUES (?, ?, ?, ?, ?)`
+	const insertLeafDataSQL = `INSERT INTO
+		LeafData(TreeId, LeafIdentityHash, LeafValue, ExtraData, QueueTimestampNanos)
+		VALUES (?, ?, ?, ?, ?)`
 	result, err := tx.Exec(insertLeafDataSQL,
 		leafData.TreeId,
 		leafData.LeafIdentityHash,
