@@ -1,5 +1,6 @@
-// A tool to fix up a CT log where the date of one entry is incorrect because the LeafData
-// for that entry belongs to a later submission of the same certificate or precertificate.
+// A tool to fix up a CT log where the date of one entry is incorrect because
+// the LeafData for that entry belongs to a later submission of the same
+// certificate or precertificate.
 package main
 
 import (
@@ -100,8 +101,9 @@ func processRow(tx *sql.Tx, reader *csv.Reader, treeId int64) error {
 // redateLeaf runs the logic of this tool, as part of a DB transaction:
 //  - Read the entry.
 //  - Come up with a new LeafIdentityHash.
-//  - Insert a new LeafData with the new LeafIdentityHash, and the corrected timestamp.
-//  - Update the SequencedLeaf for to point at the new LeafIdentityHash.
+//  - Insert a new LeafData with the new LeafIdentityHash, and the corrected
+//    timestamp.
+//  - Update the SequencedLeaf to point at the new LeafIdentityHash.
 func redateLeaf(tx *sql.Tx, treeId, index int64, correctMerkleLeafBytes []byte) error {
 	sequencedLeaf, err := selectSequencedLeaf(tx, treeId, index)
 	if err != nil {
@@ -109,36 +111,38 @@ func redateLeaf(tx *sql.Tx, treeId, index int64, correctMerkleLeafBytes []byte) 
 	}
 
 	// Verify an assumption:
-	// The stored Merkle leaf hash in the SequencedLeafData table is correct; it's just the LeafValue in
-	// the LeafData table that's wrong.
+	// The stored Merkle leaf hash in the SequencedLeafData table is correct;
+	// it's just the LeafValue in the LeafData table that's wrong.
 	correctMerkleHash := sha256.Sum256(correctMerkleLeafBytes)
 	if !bytes.Equal(correctMerkleHash[:], sequencedLeaf.MerkleLeafHash) {
 		return fmt.Errorf("mismatch: SequencedLeaf.MerkleLeafHash != SHA-256(Merkle Leaf Bytes from CSV): %x vs %x",
 			sequencedLeaf.MerkleLeafHash, correctMerkleHash[:])
 	}
 
-	// New leafIdentityHash is the result of hashing the old one a second time. Nothing
-	// particularly meaningful about this choice. It's just a way to come up with a different
-	// value that is likely to be unique, and is deterministic.
+	// New leafIdentityHash is the result of hashing the old one a second time.
+	// Nothing particularly meaningful about this choice. It's just a way to
+	// come up with a different value that is likely to be unique, and is
+	// deterministic.
 	origLeafIdentityHash := sequencedLeaf.LeafIdentityHash
 	newLeafIdentityHash := sha256.Sum256(origLeafIdentityHash)
 
-	// Fetch the existing single LeafData, so we can modify it to have the correct timestamp and
-	// save a new copy under newLeafIdentityHash, then update the SequencedLeafData entry to point at it.
+	// Fetch the existing single LeafData, so we can modify it to have the
+	// correct timestamp and save a new copy under newLeafIdentityHash, then
+	// update the SequencedLeafData entry to point at it.
 	leafData, err := selectLeafData(tx, treeId, origLeafIdentityHash)
 	if err != nil {
 		return fmt.Errorf("selecting leaf data for origLeafIdentityHash %x: %w", origLeafIdentityHash, err)
 	}
 
 	// Verify an assumption:
-	// We expect the fetched LeafData to differ from the correctMerkleLeafBytes
+	// We expect the fetched LeafData to differ from the correctMerkleLeafBytes.
 	if bytes.Equal(leafData.LeafValue, correctMerkleLeafBytes) {
 		return fmt.Errorf("expected stored leafData.LeafValue to differ from correctMerkleLeafBytes, but they were the same")
 	}
 
-	// leafData.LeafValue contains the TLS-encoded Merkle tree leaf, which in turn contains
-	// the timestamp we care about. Decode it (umarshal it) so we can modify the timestamp and
-	// re-encode.
+	// leafData.LeafValue contains the TLS-encoded Merkle tree leaf, which in
+	// turn contains the timestamp we care about. Decode it (umarshal it) so
+	// we can modify the timestamp and re-encode.
 	var brokenMerkleLeaf ct.MerkleTreeLeaf
 	_, err = tls.Unmarshal(leafData.LeafValue, &brokenMerkleLeaf)
 	if err != nil {
@@ -219,8 +223,9 @@ func selectSequencedLeaf(tx *sql.Tx, treeId, index int64) (*SequencedLeaf, error
 	)
 }
 
-// updateSequencedLeaf updates an already-existing row in the SequencedLeafData table to point at a new
-// LeafIdentityHash. Errors if it fails to update exactly one row.
+// updateSequencedLeaf updates an already-existing row in the SequencedLeafData
+// table to point at a new LeafIdentityHash. Errors if it fails to update
+// exactly one row.
 func updateSequencedLeaf(tx *sql.Tx, sequencedLeaf *SequencedLeaf, newLeafData *LeafData) error {
 	if sequencedLeaf.TreeId != newLeafData.TreeId {
 		return fmt.Errorf("sequencedLeafTreeId != leafData.TreeId: %d vs %d", sequencedLeaf.TreeId, newLeafData.TreeId)
@@ -244,7 +249,6 @@ func updateSequencedLeaf(tx *sql.Tx, sequencedLeaf *SequencedLeaf, newLeafData *
 }
 
 // LeafData represents a row in Trillian's LeafData table. See:
-//
 // https://github.com/google/trillian/blob/998c07765e8725c8ee53fb16736b25771013916e/storage/mysql/schema/storage.sql#L70-L92
 // https://github.com/google/trillian/blob/998c07765e8725c8ee53fb16736b25771013916e/storage/mysql/log_storage.go#L45
 type LeafData struct {
@@ -255,7 +259,8 @@ type LeafData struct {
 	QueueTimestampNanos int64
 }
 
-// selectLeafData retrieves a single LeafData entry from the database, indexed by TreeID and LeafIdentityHash.
+// selectLeafData retrieves a single LeafData entry from the database, indexed
+// by TreeID and LeafIdentityHash.
 func selectLeafData(tx *sql.Tx, treeId int64, leafIdentityHash []byte) (*LeafData, error) {
 	leafData := new(LeafData)
 
@@ -274,8 +279,9 @@ func selectLeafData(tx *sql.Tx, treeId int64, leafIdentityHash []byte) (*LeafDat
 	)
 }
 
-// insertLeafData inserts a single LeafData entry into the database. Errors if an entry already exists with
-// the same primary key (TreeID and LeafIdentityHash).
+// insertLeafData inserts a single LeafData entry into the database. Errors if
+// an entry already exists with the same primary key (TreeID and
+// LeafIdentityHash).
 func insertLeafData(tx *sql.Tx, leafData *LeafData) error {
 	const insertLeafDataSQL = `INSERT INTO
 		LeafData(TreeId, LeafIdentityHash, LeafValue, ExtraData, QueueTimestampNanos)
