@@ -98,6 +98,13 @@ func processRow(tx *sql.Tx, reader *csv.Reader, treeId int64) error {
 	return nil
 }
 
+func hashMerkleLeaf(d []byte) []byte {
+	h := sha256.New()
+	h.Write([]byte{0})
+	h.Write(d)
+	return h.Sum(nil)
+}
+
 // redateLeaf runs the logic of this tool, as part of a DB transaction:
 //  - Read the entry.
 //  - Come up with a new LeafIdentityHash.
@@ -113,7 +120,7 @@ func redateLeaf(tx *sql.Tx, treeId, index int64, correctMerkleLeafBytes []byte) 
 	// Verify an assumption:
 	// The stored Merkle leaf hash in the SequencedLeafData table is correct;
 	// it's just the LeafValue in the LeafData table that's wrong.
-	correctMerkleHash := sha256.Sum256(correctMerkleLeafBytes)
+	correctMerkleHash := hashMerkleLeaf(correctMerkleLeafBytes)
 	if !bytes.Equal(correctMerkleHash[:], sequencedLeaf.MerkleLeafHash) {
 		return fmt.Errorf("mismatch: SequencedLeaf.MerkleLeafHash != SHA-256(Merkle Leaf Bytes from CSV): %x vs %x",
 			sequencedLeaf.MerkleLeafHash, correctMerkleHash[:])
@@ -169,7 +176,7 @@ func redateLeaf(tx *sql.Tx, treeId, index int64, correctMerkleLeafBytes []byte) 
 			newLeafValue, correctMerkleLeafBytes)
 	}
 
-	fixedMerkleLeafHash := sha256.Sum256(newLeafValue)
+	fixedMerkleLeafHash := hashMerkleLeaf(newLeafValue)
 	if !bytes.Equal(fixedMerkleLeafHash[:], sequencedLeaf.MerkleLeafHash) {
 		return fmt.Errorf("mismatch: SequencedLeaf.MerkleLeafHash != SHA-256(newLeafValue): %x vs %x",
 			sequencedLeaf.MerkleLeafHash, correctMerkleHash[:])

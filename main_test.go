@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/csv"
@@ -115,7 +114,7 @@ CREATE TABLE IF NOT EXISTS SequencedLeafData(
 		return nil, err
 	}
 
-	mirroredMerkleLeafHash := sha256.Sum256(mirroredLeafValue)
+	mirroredMerkleLeafHash := hashMerkleLeaf(mirroredLeafValue)
 	sequencedLeaf := &SequencedLeaf{
 		TreeId:                  treeId,
 		LeafIdentityHash:        leafIdentityHash[:],
@@ -128,7 +127,7 @@ CREATE TABLE IF NOT EXISTS SequencedLeafData(
 		return nil, err
 	}
 
-	duplicateEntryMerkleLeafHash := sha256.Sum256(leafValue)
+	duplicateEntryMerkleLeafHash := hashMerkleLeaf(leafValue)
 	sequencedLeaf2 := &SequencedLeaf{
 		TreeId:                  treeId,
 		LeafIdentityHash:        leafIdentityHash[:],
