@@ -17,7 +17,7 @@ The unittest requires a MySQL or MariaDB backend. The easiest way to run it is:
 docker network create mysqlnet --internal --subnet 10.44.44.0/24
 export MYSQL_ROOT_PASSWORD="$(openssl rand -hex 20)"
 export DB="root:${MYSQL_ROOT_PASSWORD}@tcp(10.44.44.44:3306)/trill"
-docker run --network mysqlnet --ip 10.44.44.44 -e MYSQL_ROOT_PASSWORD --detach mysql
+docker run --network mysqlnet --ip 10.44.44.44 -e MYSQL_ROOT_PASSWORD --detach --name mariadb mariadb
 # Wait about 10 seconds
 mysql -u root --password="${MYSQL_ROOT_PASSWORD}" -h 10.44.44.44 -e 'CREATE DATABASE trill;'
 go test ./
